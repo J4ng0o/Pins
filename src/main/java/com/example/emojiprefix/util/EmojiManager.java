@@ -7,17 +7,17 @@ import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
+import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scoreboard.Scoreboard;
 import org.bukkit.scoreboard.Team;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.*;
-import java.util.stream.Collectors;
 
 public class EmojiManager {
 
-    private final org.bukkit.plugin.java.JavaPlugin plugin;
+    private final JavaPlugin plugin;
     private final Map<String, String> availableEmojis = new LinkedHashMap<>();
     private final Map<UUID, Set<String>> playerUnlockedEmojis = new HashMap<>();
     private final Map<UUID, String> playerCurrentEmoji = new HashMap<>();
@@ -28,7 +28,7 @@ public class EmojiManager {
 
     private static final String TEAM_PREFIX = "ep_";
 
-    public EmojiManager(org.bukkit.plugin.java.JavaPlugin plugin) {
+    public EmojiManager(JavaPlugin plugin) {
         this.plugin = plugin;
         loadDataFile();
     }
@@ -70,11 +70,9 @@ public class EmojiManager {
                     UUID uuid = UUID.fromString(uuidStr);
                     ConfigurationSection playerSection = playersSection.getConfigurationSection(uuidStr);
 
-                    // Загружаем разблокированные смайлики
                     List<String> unlocked = playerSection.getStringList("unlocked");
                     playerUnlockedEmojis.put(uuid, new HashSet<>(unlocked));
 
-                    // Загружаем текущий выбранный
                     String current = playerSection.getString("current");
                     if (current != null && !current.isEmpty()) {
                         playerCurrentEmoji.put(uuid, current);
@@ -87,13 +85,22 @@ public class EmojiManager {
     }
 
     public void savePlayerData() {
-        dataConfig.set("players", null); // Очищаем старые данные
+        dataConfig.set("players", null);
 
-        for (Map.Entry<UUID, Set<String>> entry : playerUnlockedEmojis.entrySet()) {
-            String path = "players." + entry.getKey().toString();
-            dataConfig.set(path + ".unlocked", new ArrayList<>(entry.getValue()));
+        // Объединяем все UUID, у которых что-то есть (unlocked или current)
+        Set<UUID> allUuids = new HashSet<>();
+        allUuids.addAll(playerUnlockedEmojis.keySet());
+        allUuids.addAll(playerCurrentEmoji.keySet());
 
-            String current = playerCurrentEmoji.get(entry.getKey());
+        for (UUID uuid : allUuids) {
+            String path = "players." + uuid.toString();
+
+            Set<String> unlocked = playerUnlockedEmojis.get(uuid);
+            if (unlocked != null && !unlocked.isEmpty()) {
+                dataConfig.set(path + ".unlocked", new ArrayList<>(unlocked));
+            }
+
+            String current = playerCurrentEmoji.get(uuid);
             if (current != null) {
                 dataConfig.set(path + ".current", current);
             }
@@ -121,7 +128,6 @@ public class EmojiManager {
     }
 
     public List<String> getUnlockedEmojisForDisplay(UUID uuid) {
-        // Возвращает список смайликов, которые игрок может использовать
         Set<String> unlocked = getUnlockedEmojis(uuid);
         List<String> result = new ArrayList<>();
         for (String emojiId : availableEmojis.keySet()) {
@@ -140,38 +146,106 @@ public class EmojiManager {
         return availableEmojis.get(emojiId);
     }
 
+    public String getCurrentEmojiId(UUID uuid) {
+        return playerCurrentEmoji.get(uuid);
+    }
+
     public boolean unlockEmoji(UUID uuid, String emojiId) {
         if (!availableEmojis.containsKey(emojiId)) {
             return false;
         }
-
         playerUnlockedEmojis.computeIfAbsent(uuid, k -> new HashSet<>()).add(emojiId);
         savePlayerData();
         return true;
+    }
+
+    /**
+     * Забирает смайлик у игрока. Если он был установлен как префикс — снимает и префикс.
+     * @return true, если смайлик был и его удалось забрать
+     */
+    public boolean lockEmoji(UUID uuid, String emojiId) {
+        if (!availableEmojis.containsKey(emojiId)) {
+            return false;
+        }
+
+        Set<String> unlocked = playerUnlockedEmojis.get(uuid);
+        if (unlocked == null || !unlocked.contains(emojiId)) {
+            return false;
+        }
+
+        unlocked.remove(emojiId);
+        if (unlocked.isEmpty()) {
+            playerUnlockedEmojis.remove(uuid);
+        }
+
+        // Если этот смайлик был установлен как текущий — сбрасываем
+        if (emojiId.equals(playerCurrentEmoji.get(uuid))) {
+            playerCurrentEmoji.remove(uuid);
+
+            Player player = Bukkit.getPlayer(uuid);
+            if (player != null && player.isOnline()) {
+                applyEmoji(player, "");
+            }
+        }
+
+        savePlayerData();
+        return true;
+    }
+
+    /**
+     * Забирает ВСЕ смайлики у игрока и снимает активный префикс.
+     * @return количество забранных смайликов
+     */
+    public int lockAllEmojis(UUID uuid) {
+        Set<String> unlocked = playerUnlockedEmojis.get(uuid);
+        int count = (unlocked == null) ? 0 : unlocked.size();
+
+        boolean hadCurrent = playerCurrentEmoji.containsKey(uuid);
+
+        if (unlocked != null) {
+            unlocked.clear();
+            playerUnlockedEmojis.remove(uuid);
+        }
+        playerCurrentEmoji.remove(uuid);
+
+        if (hadCurrent || count > 0) {
+            Player player = Bukkit.getPlayer(uuid);
+            if (player != null && player.isOnline()) {
+                applyEmoji(player, "");
+            }
+        }
+
+        savePlayerData();
+        return count;
     }
 
     public boolean setPlayerEmoji(UUID uuid, String emojiId) {
         if (!availableEmojis.containsKey(emojiId)) {
             return false;
         }
-
         if (!getUnlockedEmojis(uuid).contains(emojiId)) {
-            return false; // Не разблокирован
+            return false;
         }
 
         playerCurrentEmoji.put(uuid, emojiId);
         savePlayerData();
 
-        // Обновляем отображение
         Player player = Bukkit.getPlayer(uuid);
         if (player != null && player.isOnline()) {
             applyEmoji(player, availableEmojis.get(emojiId));
         }
-
         return true;
     }
 
-    public void removePlayerEmoji(UUID uuid) {
+    /**
+     * Снимает активный смайлик с ника игрока, НЕ удаляя его из разблокированных.
+     * @return true, если что-то было снято
+     */
+    public boolean clearCurrentEmoji(UUID uuid) {
+        if (!playerCurrentEmoji.containsKey(uuid)) {
+            return false;
+        }
+
         playerCurrentEmoji.remove(uuid);
         savePlayerData();
 
@@ -179,6 +253,7 @@ public class EmojiManager {
         if (player != null && player.isOnline()) {
             applyEmoji(player, "");
         }
+        return true;
     }
 
     // ==================== Применение смайлика ====================
@@ -190,8 +265,12 @@ public class EmojiManager {
 
         // 1. Устанавливаем в TabList
         if (plugin.getConfig().getBoolean("tablist-enabled", true)) {
-            Component tabName = MiniMessage.miniMessage().deserialize(prefix + player.getName());
-            player.playerListName(tabName);
+            if (prefix.isEmpty()) {
+                player.playerListName(Component.text(player.getName()));
+            } else {
+                Component tabName = MiniMessage.miniMessage().deserialize(prefix + player.getName());
+                player.playerListName(tabName);
+            }
         }
 
         // 2. Устанавливаем в Nametag через Scoreboard Team
@@ -207,7 +286,6 @@ public class EmojiManager {
         Team team = scoreboard.getTeam(teamName);
 
         if (prefix.isEmpty()) {
-            // Убираем игрока из команды, если префикс пустой
             if (team != null) {
                 team.removeEntry(player.getName());
                 playerTeamNames.remove(player.getUniqueId());
@@ -215,15 +293,12 @@ public class EmojiManager {
             return;
         }
 
-        // Создаём команду, если её нет
         if (team == null) {
             team = scoreboard.registerNewTeam(teamName);
         }
 
-        // Устанавливаем префикс (максимум 64 символа для modern versions, но обычно достаточно)
         team.setPrefix(prefix);
 
-        // Добавляем игрока в команду
         if (!team.hasEntry(player.getName())) {
             team.addEntry(player.getName());
         }
@@ -232,7 +307,6 @@ public class EmojiManager {
     }
 
     public void cleanup() {
-        // Убираем все команды, созданные плагином
         Scoreboard scoreboard = Bukkit.getScoreboardManager().getMainScoreboard();
         for (String teamName : playerTeamNames.values()) {
             Team team = scoreboard.getTeam(teamName);
@@ -242,9 +316,8 @@ public class EmojiManager {
         }
         playerTeamNames.clear();
 
-        // Сбрасываем TabList у всех игроков
         for (Player player : Bukkit.getOnlinePlayers()) {
-            player.playerListName(null); // Сбрасываем на стандартное имя
+            player.playerListName(null);
         }
     }
 
